@@ -1,0 +1,120 @@
+#stages
+stages:
+  - build
+  - test
+  - security
+  - deploy
+
+#vars
+variables:
+  IMAGE_TAG: "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+
+#
+#build & push
+#
+build:
+  stage: build
+  image: docker:24.0
+
+  services:
+    - name: docker:24.0-dind
+      alias: docker
+
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+
+  tags:
+    - devopsians-runner
+
+#connect to registry  
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" |
+      docker login "$CI_REGISTRY"
+      --username "$CI_REGISTRY_USER"
+      --password-stdin
+    
+#build with commit SHA
+  script:
+    - docker build
+      -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+      -t "$CI_REGISTRY_IMAGE:latest"
+      .
+    
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+    - docker push "$CI_REGISTRY_IMAGE:latest"
+
+#
+#test stage
+#
+test:
+  stage: test
+  image: python:3.11-slim
+
+  tags:
+    - devopsians-runner
+  
+  services:
+    - name: redis:7-alpine
+      alias: redis
+    
+  variables:
+    REDIS_HOST: redis
+    REDIS_PORT: "6379"
+    REDIS_DB: "0"
+    REDIS_PASSWORD: ""
+
+  script:
+    - pip install -r app/requirements.txt
+    - pytest -v
+
+#
+#TRIVY scans
+#
+security:
+  stage: security
+  
+  image:
+    name: aquasec/trivy:lastest
+    entrypoint: [""]
+  
+  tags:
+    - devopsians-runner
+
+  variables:
+    TRIVY_USERNAME: "$CI_REGISTRY_USER"
+    TRIVY_PASSWORD: "$CI_REGISTRY_PASSWORD"
+    
+  script:
+    - trivy image
+      --exit-code 1
+      --severity CRITICAL
+      "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+
+#
+#Deploy
+#
+deploy:
+  stage: deploy
+
+  image: docker:24.0
+
+  tags:
+    - devopsians-runner
+
+  before_script:
+     - echo "$CI_REGISTRY_PASSWORD" |
+      docker login "$CI_REGISTRY"
+      --username "$CI_REGISTRY_USER"
+      --password-stdin 
+
+  script:
+  #pull verified image from registry
+    - docker pull "$CI_REGISTRY_IMAGE:latest"
+
+    #update production
+    - docker compose -f docker-compose-prod.yml -d
+
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
